@@ -96,13 +96,58 @@ def _make_match(rule: dict[str, Any], item: dict[str, Any], *, event_type: str, 
     }
 
 
+def _build_alert_lines(alerts: list[dict[str, Any]], *, max_matches_per_rule: int = 3) -> list[str]:
+    lines = []
+    for row in alerts:
+        rule = row.get("rule") or {}
+        matched = row.get("matched") or []
+        snapshot = row.get("snapshot") or {}
+        complex_info = snapshot.get("complex_info") or {}
+        label = rule.get("name") or rule.get("id") or "이름없는 규칙"
+        header = f"- {label}: {row.get('matched_count', 0)}건"
+        if complex_info.get("name"):
+            header += f" | {complex_info.get('name')}"
+        if row.get("error"):
+            header += f" | 오류: {row['error']}"
+        lines.append(header)
+        for item in matched[:max_matches_per_rule]:
+            badges = []
+            if item.get("event_type") == "new_listing":
+                badges.append("신규")
+            elif item.get("event_type") == "price_drop":
+                badges.append("가격하락")
+            elif item.get("event_type") == "target_hit":
+                badges.append("목표가도달")
+            if item.get("previous_price_text"):
+                badges.append(f"이전 {item['previous_price_text']}")
+            badge_text = f" ({', '.join(badges)})" if badges else ""
+            lines.append(f"  · {item.get('complex_name')} {item.get('trade_type')} {item.get('price_text')} / {item.get('area_pyeong')}평{badge_text}")
+            if item.get("article_url"):
+                lines.append(f"    - {item['article_url']}")
+    return lines
+
+
+def _build_message_preview(alerts: list[dict[str, Any]], *, checked_at: int) -> str:
+    total = sum(int(row.get("matched_count") or 0) for row in alerts)
+    lines = [f"부동산 감시 점검 결과: {total}건 알림", f"checked_at={checked_at}"]
+    lines.extend(_build_alert_lines(alerts))
+    return "\n".join(lines)
+
+
 def _stdout_payload(alerts: list[dict[str, Any]], *, checked_at: int) -> dict[str, Any]:
+    preview = _build_message_preview(alerts, checked_at=checked_at)
     return {
         "kind": "naver-real-estate-watch-check",
         "schema_version": SCHEMA_VERSION,
         "checked_at": checked_at,
         "alert_count": sum(int(row.get("matched_count") or 0) for row in alerts),
         "alerts": alerts,
+        "message_preview": preview,
+        "summary": {
+            "rule_count": len(alerts),
+            "rules_with_matches": sum(1 for row in alerts if int(row.get("matched_count") or 0) > 0),
+            "rules_with_errors": sum(1 for row in alerts if row.get("error")),
+        },
     }
 
 
@@ -195,24 +240,10 @@ def check_rules(args: argparse.Namespace) -> int:
     payload = _stdout_payload(alerts, checked_at=checked_at)
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
+    elif args.preview:
+        print(payload["message_preview"])
     else:
-        lines = [f"가격 감시 점검 ({payload['alert_count']}건 알림)"]
-        for row in alerts:
-            rule = row["rule"]
-            lines.append(f"- {rule.get('name')} [{rule.get('id')}]: {row.get('matched_count', 0)}건")
-            for matched in row.get("matched", [])[:5]:
-                extra = []
-                if matched.get("event_type") == "new_listing":
-                    extra.append("신규")
-                elif matched.get("event_type") == "price_drop":
-                    extra.append("가격하락")
-                elif matched.get("event_type") == "target_hit":
-                    extra.append("목표가도달")
-                if matched.get("previous_price_text"):
-                    extra.append(f"이전 {matched['previous_price_text']}")
-                suffix = f" ({', '.join(extra)})" if extra else ""
-                lines.append(f"  · {matched.get('complex_name')} {matched.get('trade_type')} {matched.get('price_text')} / {matched.get('area_pyeong')}평 / {matched.get('article_url')}{suffix}")
-        print("\n".join(lines))
+        print(payload["message_preview"])
     return 0
 
 
@@ -239,6 +270,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("list")
     check_p = sub.add_parser("check")
     check_p.add_argument("--json", action="store_true")
+    check_p.add_argument("--preview", action="store_true", help="사람이 읽기 쉬운 preview만 출력")
     return p
 
 

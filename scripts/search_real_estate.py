@@ -51,6 +51,7 @@ LOCATION_SUFFIXES = ("특별시", "광역시", "시", "도", "군", "구", "동"
 SIMPLE_KOREAN_TOKEN_RE = re.compile(r"[가-힣A-Za-z0-9]{2,}")
 WATCH_STATE_FILE = WORKSPACE / "skills" / "naver-real-estate-search" / "data" / "watch-rules.json"
 CANDIDATE_CACHE_FILE = WORKSPACE / "skills" / "naver-real-estate-search" / "data" / "candidate-cache.json"
+DEFAULT_CANDIDATE_SEED_FILE = WORKSPACE / "skills" / "naver-real-estate-search" / "references" / "candidate-seeds.json"
 APT_SUFFIX_RE = re.compile(r"(?:아파트|맨션|타운하우스|주상복합|오피스텔|빌라)$")
 AREA_RANGE_RE = re.compile(r"(\d{1,2})\s*평\s*[~-]\s*(\d{1,2})\s*평")
 AREA_BAND_RE = re.compile(r"(\d{1,2})\s*평대")
@@ -160,10 +161,10 @@ def _write_json_file(path: Path, payload: Any) -> None:
 
 
 def _read_candidate_cache() -> dict[str, Any]:
-    data = _read_json_file(CANDIDATE_CACHE_FILE, {"version": 2, "updated_at": 0, "entries": []})
+    data = _read_json_file(CANDIDATE_CACHE_FILE, {"version": 3, "updated_at": 0, "entries": []})
     if isinstance(data, list):
-        data = {"version": 2, "updated_at": 0, "entries": data}
-    data.setdefault("version", 2)
+        data = {"version": 3, "updated_at": 0, "entries": data}
+    data.setdefault("version", 3)
     data.setdefault("updated_at", 0)
     data.setdefault("entries", [])
     return data
@@ -437,10 +438,10 @@ def _score_candidate(info: dict[str, Any], keyword: str, parsed: ParsedQuery | N
     return score
 
 
-def remember_candidate(info: dict[str, Any], aliases: list[str] | None = None) -> None:
+def remember_candidate(info: dict[str, Any], aliases: list[str] | None = None) -> dict[str, Any]:
     complex_id = str(info.get("complex_id") or "").strip()
     if not complex_id:
-        return
+        return {}
     cache = _read_candidate_cache()
     entries = cache.get("entries") or []
     by_id = {str(row.get("complex_id") or ""): dict(row) for row in entries if row.get("complex_id")}
@@ -450,6 +451,7 @@ def remember_candidate(info: dict[str, Any], aliases: list[str] | None = None) -
         for variant in expand_alias_variants(str(value or "")):
             if variant and variant not in merged_aliases:
                 merged_aliases.append(variant)
+    note_items = [str(x).strip() for x in [row.get("note"), info.get("note")] if str(x or "").strip()]
     row.update(
         {
             "complex_id": complex_id,
@@ -459,12 +461,56 @@ def remember_candidate(info: dict[str, Any], aliases: list[str] | None = None) -
             "aliases": merged_aliases[:30],
             "updated_at": int(time.time()),
             "source": info.get("source") or row.get("source") or "runtime",
+            "learned_from": info.get("learned_from") or row.get("learned_from"),
+            "note": note_items[-1] if note_items else None,
         }
     )
     by_id[complex_id] = row
     rows = sorted(by_id.values(), key=lambda x: (-int(x.get("updated_at") or 0), str(x.get("name") or "")))
     cache["entries"] = rows[:500]
     _write_candidate_cache(cache)
+    return row
+
+
+def list_candidate_cache(*, limit: int = 50, keyword: str | None = None) -> list[dict[str, Any]]:
+    rows = _read_candidate_cache().get("entries") or []
+    if keyword:
+        term = normalize_complex_alias(keyword)
+        rows = [
+            row for row in rows
+            if term in normalize_complex_alias(row.get("name") or "")
+            or any(term in normalize_complex_alias(alias) for alias in (row.get("aliases") or []))
+            or term in normalize_complex_alias(row.get("address") or "")
+        ]
+    rows = sorted(rows, key=lambda row: (-int(row.get("updated_at") or 0), str(row.get("name") or "")))
+    return rows[: max(1, limit)]
+
+
+def seed_candidate_cache(entries: list[dict[str, Any]], *, source: str = "seed-file") -> list[dict[str, Any]]:
+    saved: list[dict[str, Any]] = []
+    for item in entries:
+        complex_id = str(item.get("complex_id") or "").strip()
+        if not complex_id:
+            continue
+        info = {
+            "complex_id": complex_id,
+            "name": item.get("name"),
+            "address": item.get("address"),
+            "household_count": item.get("household_count"),
+            "source": item.get("source") or source,
+            "learned_from": item.get("learned_from") or source,
+            "note": item.get("note"),
+        }
+        saved.append(remember_candidate(info, aliases=[str(x) for x in (item.get("aliases") or []) if str(x).strip()]))
+    return [row for row in saved if row]
+
+
+def seed_candidate_from_file(path: str | Path | None = None) -> dict[str, Any]:
+    target = Path(path) if path else DEFAULT_CANDIDATE_SEED_FILE
+    payload = _read_json_file(target, {"entries": []})
+    entries = payload.get("entries") if isinstance(payload, dict) else payload
+    saved = seed_candidate_cache(entries or [], source=f"seed-file:{target.name}")
+    return {"path": str(target), "saved_count": len(saved), "saved": saved}
 
 
 def search_cached_candidates(query: str, *, candidate_limit: int = 5, parsed: ParsedQuery | None = None) -> list[dict[str, Any]]:
@@ -833,8 +879,13 @@ def run_self_test() -> int:
 
     backup_cache = _read_candidate_cache()
     remember_candidate({"complex_id": "777", "name": "신월시영아파트", "address": "서울시 양천구 신월동", "household_count": 2256}, aliases=["신월시영", "양천 신월시영"])
+    saved = seed_candidate_cache([
+        {"complex_id": "778", "name": "리센츠", "address": "서울시 송파구 잠실동", "aliases": ["잠실 리센츠", "잠실리센츠"], "household_count": 5563}
+    ], source="self-test")
     cached = search_cached_candidates("신월시영아파트", candidate_limit=3)
     assert cached and cached[0]["complex_id"] == "777"
+    assert saved and any(row["complex_id"] == "778" for row in saved)
+    assert list_candidate_cache(limit=5, keyword="리센츠")
     _write_candidate_cache(backup_cache)
 
     score = _score_candidate({"name": "잠실리센츠", "address": "서울시 송파구 잠실동", "household_count": 5563}, "리센츠", parsed)
@@ -872,6 +923,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--list-candidates", action="store_true", help="매물 조회 대신 단지 후보만 출력")
     p.add_argument("--compare", action="store_true", help="후보 상위 단지들을 비교 모드로 조회")
     p.add_argument("--parse-only", action="store_true", help="자연어 파싱 결과만 출력")
+    p.add_argument("--show-cache", action="store_true", help="candidate cache를 조회")
+    p.add_argument("--seed-candidate-file", nargs="?", const="", help="candidate-cache에 seed할 JSON 파일 경로. 비우면 references/candidate-seeds.json")
+    p.add_argument("--seed-candidate", action="store_true", help="단일 후보를 candidate-cache에 직접 저장")
+    p.add_argument("--candidate-name", help="seed candidate 이름")
+    p.add_argument("--candidate-address", help="seed candidate 주소")
+    p.add_argument("--candidate-households", type=int, help="seed candidate 세대수")
+    p.add_argument("--candidate-aliases", default="", help="쉼표 구분 alias 목록")
+    p.add_argument("--candidate-note", help="seed candidate 메모")
     p.add_argument("--json", action="store_true")
     p.add_argument("--self-test", action="store_true")
     return p
@@ -885,6 +944,35 @@ def main() -> int:
     parsed = parse_natural_query(args.query or "") if args.query else None
     if args.parse_only:
         print(json.dumps(asdict(parsed) if parsed else {}, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.seed_candidate_file is not None:
+        result = seed_candidate_from_file(args.seed_candidate_file or None)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.seed_candidate:
+        if not args.complex_id:
+            raise SystemExit("--seed-candidate 는 --complex-id 와 함께 사용하세요.")
+        aliases = [token.strip() for token in str(args.candidate_aliases or "").split(",") if token.strip()]
+        saved = remember_candidate(
+            {
+                "complex_id": args.complex_id,
+                "name": args.candidate_name,
+                "address": args.candidate_address,
+                "household_count": args.candidate_households,
+                "source": "manual-seed",
+                "learned_from": args.query or args.url or "manual-seed",
+                "note": args.candidate_note,
+            },
+            aliases=aliases,
+        )
+        print(json.dumps({"saved": True, "candidate": saved}, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.show_cache:
+        rows = list_candidate_cache(limit=max(1, args.limit), keyword=args.query)
+        print(json.dumps({"count": len(rows), "entries": rows}, ensure_ascii=False, indent=2))
         return 0
 
     trade_types = [token.strip() for token in str(args.trade_types).split(",") if token.strip()]

@@ -1,0 +1,28 @@
+{
+  "entries": [
+    {
+      "complex_id": "1147",
+      "name": "리센츠",
+      "address": "서울특별시 송파구 잠실동",
+      "household_count": 5563,
+      "aliases": [
+        "잠실 리센츠",
+        "잠실리센츠",
+        "리센츠아파트"
+      ],
+      "note": "verified warm-cache seed example"
+    }
+  ],
+  "examples": [
+    {
+      "name": "신월시영아파트",
+      "address": "서울특별시 양천구 신월동",
+      "aliases": [
+        "신월시영",
+        "양천 신월시영",
+        "신월시영아파트"
+      ],
+      "note": "alias-learning example. Fill verified complex_id before adding to entries for production seed."
+    }
+  ]
+}

@@ -9,12 +9,13 @@
 ## 이번 고도화 핵심
 
 ### 1) 식별/안정성
-- candidate cache를 단순 리스트에서 `version/entries/updated_at` 구조로 확장
+- candidate cache를 단순 리스트에서 `version/entries/updated_at` 구조로 확장하고, seed/import/list 관리용 CLI를 추가
 - alias 변형 생성 강화: 원문 / 공백 정리 / suffix 제거 / `아파트` 재부착 / 일부 지역 alias 확장
 - 자연어 파서 강화: raw subject, location hint, direct complex ID 추출 보존
 - cold-start 후보 탐색 시 `지역 + 단지명`, raw subject, cleaned query를 조합한 다중 검색어 전략 사용
 - 점수화 기준 강화: 이름 정규화, alias, 질의 토큰, 주소 내 지역 힌트, 세대수 신뢰도 반영
 - `신월시영아파트` 같은 케이스에서 alias cache warm-up 이후 재질문 성공률이 높아지도록 설계
+- `references/candidate-seeds.json`을 통해 자주 쓰는 단지 후보를 운영 전 warm-cache 할 수 있게 설계
 - 429 발생 시 메타에 상태를 남기고 direct URL/ID 우선 재시도 흐름을 유지
 
 ### 2) 비교/출력
@@ -40,6 +41,8 @@
   - `checked_at`
   - `alert_count`
   - `alerts[]`
+  - `message_preview`
+  - `summary`
 - `last_seen` + `dedupe_key` 기반 중복 알림 억제
 - snapshot에 `complex_info`, `market_summary`, `meta`를 넣어 텔레그램/브리핑 레이어가 재가공하기 쉽게 만듦
 
