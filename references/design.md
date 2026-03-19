@@ -2,88 +2,109 @@
 
 ## 목표
 - 대한민국 / 네이버 부동산 맥락에 맞는 OpenClaw 스킬 제공
-- 자연어 요청을 빠르게 최소 실행 가능한 검색 파라미터로 바꾸기
-- `twbeatles/naverland-scrapper`의 내부 로직을 가능한 범위에서 재사용
-- 429가 잦은 환경에서도 **단일 단지 우선 → 후보 좁히기 → 비교** 흐름을 유지
+- 자연어 요청을 최소 실행 가능한 검색 파라미터로 빠르게 축약
+- `twbeatles/naverland-scrapper` 내부 로직을 가능한 범위에서 재사용
+- 429 환경에서도 **direct URL/ID 우선 → 후보 좁히기 → 비교 → 감시** 흐름 유지
 
-## 현재 구현 범위
-1. 단지 URL 또는 complex ID 입력
-2. 지역/단지 키워드 또는 자연어 질의에서 단지 후보 추출 시도
-3. 매매/전세/월세 추론
-4. 평수 추론 (`30평대`, `25평`, `25평~34평`)
-5. 단일 단지 조회
-6. 복수 단지 비교 요약
-7. JSON 또는 텍스트 요약 출력
+## 이번 고도화 핵심
 
-## 재사용한 upstream 로직
-- `src.core.parser.NaverURLParser`
-  - 네이버 부동산 URL/텍스트에서 `complex_id` 추출
-  - 단지명 조회 로직 재사용
-- `src.core.services.response_capture.normalize_article_payload`
-  - 네이버 API article payload를 한국어 필드 구조로 정규화
-- `src.utils.helpers.PriceConverter`
-  - 가격 문자열 ↔ 정수 비교/정렬
-- `src.utils.helpers.get_article_url`
-  - 매물 URL 재구성
+### 1) 식별/안정성
+- candidate cache를 단순 리스트에서 `version/entries/updated_at` 구조로 확장
+- alias 변형 생성 강화: 원문 / 공백 정리 / suffix 제거 / `아파트` 재부착 / 일부 지역 alias 확장
+- 자연어 파서 강화: raw subject, location hint, direct complex ID 추출 보존
+- cold-start 후보 탐색 시 `지역 + 단지명`, raw subject, cleaned query를 조합한 다중 검색어 전략 사용
+- 점수화 기준 강화: 이름 정규화, alias, 질의 토큰, 주소 내 지역 힌트, 세대수 신뢰도 반영
+- `신월시영아파트` 같은 케이스에서 alias cache warm-up 이후 재질문 성공률이 높아지도록 설계
+- 429 발생 시 메타에 상태를 남기고 direct URL/ID 우선 재시도 흐름을 유지
 
-## 429 완화 전략 (MVP)
+### 2) 비교/출력
+- 거래유형별 `min/avg/median/max` 요약 추가
+- `area_summary`를 도입해 동일 평형 버킷(예: `33평`) 기준 비교 가능하게 확장
+- compare 결과에 `compare_insights.trade`, `compare_insights.same_area` 계층 추가
+- 한국어 브리핑에서:
+  - 전체 평균 비교 문장
+  - 동일 평형 기준 비교 문장
+  - 가격 분산 해석 문장
+  - 대표 매물 bullet 정리
+  를 더 자연스럽게 생성
 
-### 1) 자동 짧은 백오프
-- API JSON 요청 시 429를 만나면 짧은 sleep 후 재시도한다.
-- 현재 기본값: `1.5초`, `3초`
-- 그 이후에도 실패하면 더 밀어붙이지 않고 사용자 흐름을 바꾼다.
+### 3) 감시/연동
+- watch schema를 `schema_version`, `rules`, `events`, `last_seen`, `last_checked_at` 구조로 확장
+- rule 단위 옵션 추가:
+  - `target_max_price`
+  - `notify_on_new`
+  - `notify_on_price_drop`
+- check 결과 stdout JSON을 상위 레이어 친화적으로 정리:
+  - `kind`
+  - `schema_version`
+  - `checked_at`
+  - `alert_count`
+  - `alerts[]`
+- `last_seen` + `dedupe_key` 기반 중복 알림 억제
+- snapshot에 `complex_info`, `market_summary`, `meta`를 넣어 텔레그램/브리핑 레이어가 재가공하기 쉽게 만듦
 
-### 2) 단일 단지 우선
-- 가장 안정적인 입력은 `complex-id` 또는 단지 URL이다.
-- 지역명만으로 넓게 스캔하면 429 가능성이 높아진다.
-- 따라서 UX는 다음 순서를 권장한다:
-  1. direct URL/ID
-  2. 자연어에서 후보 1~3개 찾기
-  3. 선택된 단지 조회
-  4. 필요할 때만 복수 단지 비교
+## 후보 탐색 전략 상세
 
-### 3) 비교도 좁게
-- 비교는 `candidate-limit 2~3` 정도만 권장한다.
-- 광역 지역 전체 단지를 한 번에 훑는 방식은 MVP에서 비권장이다.
+1. direct complex ID / URL / 텍스트 내 complex ID를 먼저 본다.
+2. cache에서 alias exact/contains 매칭을 먼저 시도한다.
+3. 실패 시 web search를 쓰되 단일 키워드 하나만 쓰지 않는다.
+   - raw subject
+   - cleaned query
+   - candidate keyword
+   - location hint
+   - `지역 + 단지명` 조합
+4. 수집한 complex ID에 대해 상세 API를 조회해 이름/주소/세대수 보강
+5. 점수 상위 후보만 반환
 
-### 4) 실패 시 메시지 전략
-429가 반복되면 다음 메시지로 전환한다.
-- “단지 URL/ID를 주시면 훨씬 안정적으로 조회됩니다.”
-- “강남 전세”처럼 넓은 표현보다 “대치 은마 전세 30평대”처럼 좁혀 달라고 요청한다.
-- 먼저 후보만 보여주고, 사용자가 하나를 고르게 한다.
+## 429 운영 원칙
+- 먼저 짧은 backoff로 재시도한다.
+- 여전히 실패하면 더 넓은 탐색으로 밀어붙이지 않는다.
+- 사용자나 상위 레이어에 다음을 유도한다.
+  - direct complex ID
+  - direct URL
+  - 후보 1~3개만 좁혀 재시도
 
-## 자연어 파싱 전략
-- 거래유형 키워드 포함 여부로 `매매/전세/월세` 추론
-- `N평대`, `N평`, `N평~M평` 패턴 인식
-- `비교`, `대비`, `와`, `과`, `랑`, `,`, `vs` 등으로 후보 키워드 분할
-- 부동산/시세/정리/알려줘 같은 불용어 제거 후 후보 검색 질의 생성
+## watch JSON 예시
 
-## 단지 후보 탐색 전략
-현재는 네이버 검색 결과 HTML에서 단지/complexNo 패턴을 뽑아 ID 후보를 만들고,
-가능하면 단지 상세 API로 이름/주소를 붙인다.
+```json
+{
+  "kind": "naver-real-estate-watch-check",
+  "schema_version": 2,
+  "checked_at": 1760000000,
+  "alert_count": 2,
+  "alerts": [
+    {
+      "rule": {"id": "rule-abcd1234", "name": "리센츠 전세 30평대"},
+      "matched_count": 1,
+      "matched": [
+        {
+          "event_type": "target_hit",
+          "article_key": "1147:123456789",
+          "price": 950000000,
+          "price_text": "9억 5,000",
+          "article_url": "https://new.land.naver.com/..."
+        }
+      ],
+      "snapshot": {
+        "complex_info": {"name": "리센츠"},
+        "market_summary": {"전세": {"count": 8}},
+        "meta": {"rate_limited": false}
+      }
+    }
+  ]
+}
+```
 
-장점:
-- 별도 브라우저 런타임 없이 바로 실행 가능
-- 지역명/단지명 자연어에 어느 정도 반응
+## 테스트 권장 시나리오
+- `--self-test`
+- `--parse-only` 로 자연어 파서 확인
+- `--list-candidates` 로 tricky alias 확인
+- direct complex ID 조회
+- 비교 브리핑 확인
+- watch add/check 및 두 번째 check에서 dedupe 동작 확인
 
-한계:
-- 네이버 검색 결과 마크업 변경에 취약
-- 지역명만 넓게 넣으면 후보 품질이 낮을 수 있음
-- 단지명 disambiguation(동명이 단지)에는 아직 약함
-
-## 비교 요약 전략
-단지별로 거래유형 그룹을 만들고 다음을 계산한다.
-- 건수
-- 최저가
-- 평균가(단순 평균)
-- 최고가
-- 대표 매물 샘플
-
-MVP 단계라서 중앙값/분위수/동일 공급면적 기준 정교한 비교는 아직 미구현이다.
-
-## 후속 개선 아이디어
-- Playwright 기반 브라우저 세션/쿠키 재사용
-- 지역명 → 단지 후보 검색 정확도 향상
-- 동일 평형/공급면적끼리 정렬한 비교 리포트
-- 매매/전세가율 같은 파생 요약
-- 가격 감시/목표가 알림과 결합
+## 추가 개선 후보
+- Playwright 세션 재사용 기반 429 회피력 향상
+- 실거래가/전세가율 같은 파생 지표 추가
+- 특정 지역 사전(alias seed) 확장
+- 텔레그램 markdown-safe formatter 별도 스크립트 추가

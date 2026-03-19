@@ -22,15 +22,48 @@ def _pick_headline(meta: dict[str, Any], trade_type: str) -> str:
     return f"{trade_type} 매물이 비교적 넉넉하게 잡힙니다."
 
 
+def _trend_line(meta: dict[str, Any]) -> str:
+    min_price = meta.get("min_price")
+    avg_price = meta.get("avg_price")
+    max_price = meta.get("max_price")
+    if not (min_price and avg_price and max_price):
+        return "가격대 해석용 표본은 아직 제한적입니다."
+    spread = max_price - min_price
+    if spread <= max(1, avg_price * 0.05):
+        return "가격 분산이 크지 않아 호가대가 비교적 촘촘합니다."
+    if spread >= max(1, avg_price * 0.15):
+        return "호가 폭이 꽤 넓어서 같은 단지 안에서도 조건 차이가 크게 보입니다."
+    return "호가 차이는 있으나 극단적으로 벌어지지는 않습니다."
+
+
+def _representative_lines(items: list[dict[str, Any]], max_items: int = 3) -> list[str]:
+    lines: list[str] = []
+    for row in items[:max_items]:
+        price = row.get("매매가") or row.get("보증금") or "-"
+        if row.get("거래유형") == "월세" and row.get("월세"):
+            price = f"{price}/{row.get('월세')}"
+        parts = [f"{price}", f"{row.get('면적(평)', 0)}평", row.get("층/방향", "-") or "-"]
+        lines.append(f"  · 대표 매물: {', '.join(parts)}")
+        if row.get("특징"):
+            lines.append(f"    - 포인트: {row['특징']}")
+        if row.get("매물URL"):
+            lines.append(f"    - 링크: {row['매물URL']}")
+    return lines
+
+
 def brief_single(payload: dict[str, Any]) -> str:
     info = payload.get("complex_info") or {}
+    parsed = payload.get("parsed") or {}
     lines = [f"{info.get('name', payload.get('selected_complex_id'))} 브리핑"]
     if info.get("address"):
         lines.append(f"- 위치: {info['address']}")
-    if payload.get("parsed", {}).get("min_pyeong") or payload.get("parsed", {}).get("max_pyeong"):
-        lines.append(
-            f"- 평형 필터: {payload.get('parsed', {}).get('min_pyeong', '-') }~{payload.get('parsed', {}).get('max_pyeong', '-') }평"
-        )
+    filters = []
+    if payload.get("trade_types"):
+        filters.append("거래유형 " + ", ".join(payload["trade_types"]))
+    if parsed.get("min_pyeong") or parsed.get("max_pyeong"):
+        filters.append(f"평형 {parsed.get('min_pyeong', '-')}~{parsed.get('max_pyeong', '-')}평")
+    if filters:
+        lines.append(f"- 필터: {' / '.join(filters)}")
     summary = payload.get("market_summary") or {}
     if not summary:
         lines.append("- 조건에 맞는 매물이 아직 잡히지 않았습니다.")
@@ -38,26 +71,20 @@ def brief_single(payload: dict[str, Any]) -> str:
     for trade_type, meta in summary.items():
         lines.append(f"- {trade_type}: {meta.get('count', 0)}건")
         lines.append(f"  · {_pick_headline(meta, trade_type)}")
-        lines.append(
-            f"  · 가격대: 최저 {_fmt_price(meta.get('min_price'))} / 평균 {_fmt_price(meta.get('avg_price'))} / 최고 {_fmt_price(meta.get('max_price'))}"
-        )
-    for row in payload.get("items", [])[:3]:
-        price = row.get("매매가") or row.get("보증금") or "-"
-        if row.get("거래유형") == "월세" and row.get("월세"):
-            price = f"{price}/{row.get('월세')}"
-        lines.append(f"- 대표 매물: {price}, {row.get('면적(평)', 0)}평, {row.get('층/방향', '-') or '-'}")
-        if row.get("특징"):
-            lines.append(f"  · 포인트: {row['특징']}")
-        if row.get("매물URL"):
-            lines.append(f"  · 링크: {row['매물URL']}")
+        lines.append(f"  · 가격대: 최저 {_fmt_price(meta.get('min_price'))} / 평균 {_fmt_price(meta.get('avg_price'))} / 중앙값 {_fmt_price(meta.get('median_price'))} / 최고 {_fmt_price(meta.get('max_price'))}")
+        lines.append(f"  · 해석: {_trend_line(meta)}")
+        area_rows = meta.get("area_summary") or []
+        if area_rows:
+            head = area_rows[0]
+            lines.append(f"  · 동일 평형 대표: {head.get('area_key')} {head.get('count')}건, 평균 {_fmt_price(head.get('avg_price'))}")
+    lines.extend(_representative_lines(payload.get("items", [])))
     return "\n".join(lines)
 
 
 def brief_compare(payload: dict[str, Any]) -> str:
     results = payload.get("results") or []
+    insights = payload.get("compare_insights") or {}
     lines = ["단지 비교 브리핑"]
-    trade_best: dict[str, tuple[str, int]] = {}
-    trade_worst: dict[str, tuple[str, int]] = {}
     for result in results:
         info = result.get("complex_info") or {}
         name = info.get("name", result.get("complex_id"))
@@ -68,23 +95,20 @@ def brief_compare(payload: dict[str, Any]) -> str:
             lines.append("  · 조건에 맞는 매물이 거의 안 보입니다.")
             continue
         for trade_type, meta in summary.items():
-            avg_price = meta.get("avg_price")
-            lines.append(
-                f"  · {trade_type}: {meta.get('count', 0)}건 / 최저 {_fmt_price(meta.get('min_price'))} / 평균 {_fmt_price(avg_price)} / 최고 {_fmt_price(meta.get('max_price'))}"
-            )
-            if avg_price:
-                if trade_type not in trade_best or avg_price < trade_best[trade_type][1]:
-                    trade_best[trade_type] = (name, avg_price)
-                if trade_type not in trade_worst or avg_price > trade_worst[trade_type][1]:
-                    trade_worst[trade_type] = (name, avg_price)
-    for trade_type in sorted(trade_best):
-        best_name, best_price = trade_best[trade_type]
-        worst_name, worst_price = trade_worst[trade_type]
-        gap = worst_price - best_price
-        if gap > 0:
-            lines.append(
-                f"- 해석: {trade_type} 기준으로는 {best_name} 쪽 평균이 더 낮고, {worst_name} 쪽이 더 높습니다. 차이는 대략 {_fmt_price(gap)}입니다."
-            )
+            lines.append(f"  · {trade_type}: {meta.get('count', 0)}건 / 최저 {_fmt_price(meta.get('min_price'))} / 평균 {_fmt_price(meta.get('avg_price'))} / 중앙값 {_fmt_price(meta.get('median_price'))} / 최고 {_fmt_price(meta.get('max_price'))}")
+            area_rows = meta.get("area_summary") or []
+            if area_rows:
+                head = area_rows[0]
+                lines.append(f"    - 대표 동일 평형: {head.get('area_key')} {head.get('count')}건 / 평균 {_fmt_price(head.get('avg_price'))}")
+    for trade_type, meta in (insights.get("trade") or {}).items():
+        lines.append(f"- 종합 해석 ({trade_type}): {meta['cheapest']['name']} 쪽 평균이 가장 낮고 {meta['most_expensive']['name']} 쪽이 가장 높습니다. 전체 평균 차이는 {_fmt_price(meta['gap'])} 정도입니다.")
+    for trade_type, area_rows in (insights.get("same_area") or {}).items():
+        if not area_rows:
+            continue
+        head = area_rows[0]
+        lines.append(f"- 동일 평형 해석 ({trade_type} {head['area_key']}): {head['cheapest']['name']} 쪽이 더 낮고 {head['most_expensive']['name']} 쪽이 더 높습니다. 같은 평형 기준 차이는 {_fmt_price(head['gap'])} 정도입니다.")
+    if payload.get("meta", {}).get("rate_limited"):
+        lines.append("- 참고: 현재 네이버 요청 제한이 감지돼 direct URL/complex ID 기반 조회가 더 안정적일 수 있습니다.")
     return "\n".join(lines)
 
 
@@ -116,9 +140,7 @@ def main() -> int:
         else:
             lines = ["후보 단지"]
             for idx, row in enumerate(candidates, start=1):
-                lines.append(
-                    f"- {idx}. {row.get('name')} | {row.get('address') or '-'} | ID {row.get('complex_id')} | score {row.get('match_score', '-') }"
-                )
+                lines.append(f"- {idx}. {row.get('name')} | {row.get('address') or '-'} | ID {row.get('complex_id')} | score {row.get('match_score', '-')} | source {row.get('source', '-')}")
             print("\n".join(lines))
         return 0
 
