@@ -39,8 +39,14 @@ DEFAULT_QUERY_SUFFIX = " 네이버 부동산 아파트"
 DEFAULT_BACKOFFS = [1.5, 3.0]
 STOPWORDS = [
     "네이버 부동산", "부동산", "시세", "매물", "가격", "가격대", "얼마", "비교", "정리", "요약", "알려줘", "찾아줘",
-    "보여줘", "조회", "검색", "추천", "아파트", "빌라", "오피스텔", "매매", "전세", "월세", "실거래가", "단지",
+    "보여줘", "조회", "검색", "추천", "아파트", "빌라", "오피스텔", "실거래가", "단지", "찾기", "브리핑",
+    "해줘", "해주세요", "알림", "감시", "체크", "체크해줘", "요청", "보고", "리포트", "채팅", "래퍼",
 ]
+TRADE_STOPWORDS = ["매매", "전세", "월세"]
+COMPARE_TOKENS = ["비교", "대비", "vs", "VS"]
+LOCATION_HINT_RE = re.compile(r"([가-힣]{2,}(?:시|도|군|구|동|읍|면|리|가))")
+SIMPLE_KOREAN_TOKEN_RE = re.compile(r"[가-힣]{2,}")
+WATCH_STATE_FILE = WORKSPACE / "skills" / "naver-real-estate-search" / "data" / "watch-rules.json"
 
 
 class SearchError(RuntimeError):
@@ -56,6 +62,7 @@ class ParsedQuery:
     max_pyeong: float | None
     compare_mode: bool
     candidate_keywords: list[str]
+    location_hints: list[str]
 
 
 def _request_json(url: str, *, referer: str = "https://new.land.naver.com/", backoffs: list[float] | None = None) -> Any:
@@ -92,11 +99,12 @@ def _request_text(url: str) -> str:
 
 
 def normalize_keyword(text: str) -> str:
-    value = text.strip()
-    for token in STOPWORDS:
+    value = str(text or "").strip()
+    for token in STOPWORDS + TRADE_STOPWORDS:
         value = value.replace(token, " ")
     value = re.sub(r"\b\d+\s*평(?:대|형)?\b", " ", value)
     value = re.sub(r"\b\d+\s*(?:평|형)\b", " ", value)
+    value = re.sub(r"\b\d+\s*[~-]\s*\d+\s*평\b", " ", value)
     value = re.sub(r"\s+", " ", value).strip(" ,/")
     return value
 
@@ -124,6 +132,24 @@ def parse_pyeong_range(query: str) -> tuple[float | None, float | None]:
     return None, None
 
 
+def extract_location_hints(query: str) -> list[str]:
+    seen: set[str] = set()
+    results: list[str] = []
+    raw_query = str(query or "")
+    for match in LOCATION_HINT_RE.finditer(raw_query):
+        token = match.group(1).strip()
+        if token and token not in seen:
+            results.append(token)
+            seen.add(token)
+    if not results:
+        tokens = SIMPLE_KOREAN_TOKEN_RE.findall(normalize_keyword(raw_query))
+        for token in tokens[:2]:
+            if token and token not in seen:
+                results.append(token)
+                seen.add(token)
+    return results[:5]
+
+
 def split_candidate_keywords(query: str) -> list[str]:
     cleaned = normalize_keyword(query)
     if not cleaned:
@@ -142,8 +168,9 @@ def split_candidate_keywords(query: str) -> list[str]:
 def parse_natural_query(query: str) -> ParsedQuery:
     min_pyeong, max_pyeong = parse_pyeong_range(query)
     candidate_keywords = split_candidate_keywords(query)
-    compare_mode = any(token in query for token in ["비교", "대비"]) or len(candidate_keywords) >= 2
+    compare_mode = any(token in query for token in COMPARE_TOKENS) or len(candidate_keywords) >= 2
     cleaned_query = normalize_keyword(query)
+    location_hints = extract_location_hints(query)
     return ParsedQuery(
         raw_query=query,
         cleaned_query=cleaned_query,
@@ -152,6 +179,7 @@ def parse_natural_query(query: str) -> ParsedQuery:
         max_pyeong=max_pyeong,
         compare_mode=compare_mode,
         candidate_keywords=candidate_keywords or ([cleaned_query] if cleaned_query else []),
+        location_hints=location_hints,
     )
 
 
@@ -180,12 +208,70 @@ def extract_complex_candidates_from_web(query: str, limit: int = 5) -> list[dict
 def fetch_complex_info(complex_id: str) -> dict[str, Any]:
     payload = _request_json(COMPLEX_DETAIL_URL.format(complex_id=complex_id))
     info = payload.get("complexDetail") or payload
+    address = " ".join(
+        filter(
+            None,
+            [
+                str(info.get("cortarAddress") or "").strip(),
+                str(info.get("roadAddressPrefix") or "").strip(),
+            ],
+        )
+    ).strip()
     return {
         "complex_id": complex_id,
         "name": str(info.get("complexName") or info.get("complexNm") or f"단지_{complex_id}"),
-        "address": " ".join(filter(None, [str(info.get("cortarAddress") or "").strip(), str(info.get("roadAddressPrefix") or "").strip()] )).strip(),
+        "address": address,
         "household_count": info.get("totalHouseHoldCount") or info.get("houseHoldCount"),
     }
+
+
+def _tokenize_for_match(text: str) -> list[str]:
+    normalized = normalize_keyword(text)
+    return [token for token in re.split(r"\s+", normalized) if token and len(token) >= 2]
+
+
+def _score_candidate(info: dict[str, Any], keyword: str, parsed: ParsedQuery | None) -> int:
+    score = 0
+    name = str(info.get("name") or "")
+    address = str(info.get("address") or "")
+    haystack = f"{name} {address}"
+    keyword_tokens = _tokenize_for_match(keyword)
+    query_tokens = _tokenize_for_match(parsed.cleaned_query if parsed else keyword)
+
+    for token in keyword_tokens:
+        if token == name:
+            score += 120
+        elif token in name:
+            score += 45
+        elif token in address:
+            score += 20
+        elif token in haystack:
+            score += 10
+
+    for token in query_tokens:
+        if token in name:
+            score += 12
+        elif token in address:
+            score += 6
+
+    if parsed:
+        for location in parsed.location_hints:
+            if location in address:
+                score += 30
+            elif location in name:
+                score += 15
+
+    household_count = info.get("household_count") or 0
+    try:
+        household_count = int(household_count)
+    except Exception:
+        household_count = 0
+    if household_count >= 300:
+        score += 4
+    if household_count >= 800:
+        score += 4
+
+    return score
 
 
 def resolve_complex_ids(query: str | None, complex_id: str | None, url: str | None, *, candidate_limit: int = 5) -> list[str]:
@@ -206,27 +292,50 @@ def resolve_complex_ids(query: str | None, complex_id: str | None, url: str | No
             _push(cid)
         if not results:
             parsed = parse_natural_query(query)
-            for keyword in parsed.candidate_keywords[:candidate_limit]:
-                for item in extract_complex_candidates_from_web(keyword, limit=candidate_limit):
-                    _push(item.get("complex_id"))
-                    if len(results) >= candidate_limit:
-                        break
+            ranked_candidates = search_complex_candidates(query, candidate_limit=max(candidate_limit * 2, 6))
+            for item in ranked_candidates:
+                _push(item.get("complex_id"))
                 if len(results) >= candidate_limit:
                     break
-    return results
+            if not results:
+                for keyword in parsed.candidate_keywords[:candidate_limit]:
+                    for item in extract_complex_candidates_from_web(keyword, limit=candidate_limit):
+                        _push(item.get("complex_id"))
+                        if len(results) >= candidate_limit:
+                            break
+                    if len(results) >= candidate_limit:
+                        break
+    return results[:candidate_limit]
 
 
 def search_complex_candidates(query: str, *, candidate_limit: int = 5) -> list[dict[str, Any]]:
     parsed = parse_natural_query(query)
-    ids = resolve_complex_ids(query, None, None, candidate_limit=candidate_limit)
-    candidates: list[dict[str, Any]] = []
-    for cid in ids[:candidate_limit]:
+    search_terms: list[str] = []
+    for value in [parsed.cleaned_query, *parsed.candidate_keywords, *parsed.location_hints]:
+        value = str(value or "").strip()
+        if value and value not in search_terms:
+            search_terms.append(value)
+
+    raw_ids: list[tuple[str, str]] = []
+    seen_ids: set[str] = set()
+    for term in search_terms[:6]:
+        for item in extract_complex_candidates_from_web(term, limit=max(candidate_limit * 2, 6)):
+            cid = str(item.get("complex_id") or "").strip()
+            if cid and cid not in seen_ids:
+                raw_ids.append((cid, term))
+                seen_ids.add(cid)
+
+    scored: list[dict[str, Any]] = []
+    for cid, source_term in raw_ids:
         try:
             info = fetch_complex_info(cid)
         except Exception as exc:
             info = {"complex_id": cid, "name": f"단지_{cid}", "address": "", "error": str(exc)}
-        candidates.append(info)
-    return candidates
+        score = _score_candidate(info, source_term, parsed)
+        scored.append({**info, "match_score": score, "source_term": source_term})
+
+    scored.sort(key=lambda row: (-int(row.get("match_score") or 0), str(row.get("name") or ""), str(row.get("complex_id") or "")))
+    return scored[:candidate_limit]
 
 
 def fetch_articles(complex_id: str, trade_types: list[str], pages: int = 1) -> list[dict[str, Any]]:
@@ -304,20 +413,111 @@ def summarize(items: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _brief_price(value: int | None) -> str:
+    return PriceConverter.to_string(value) if value else "-"
+
+
 def summarize_comparison(results: list[dict[str, Any]]) -> str:
     if not results:
         return "비교할 단지 결과가 없습니다."
-    lines = ["[단지 비교 요약]"]
+    lines = ["[단지 비교 브리핑]"]
+    comparable_rows: list[tuple[str, str, int | None]] = []
     for result in results:
         info = result.get("complex_info", {})
-        lines.append(f"- {info.get('name', result.get('complex_id'))} (ID {result.get('complex_id')})")
-        lines.append(f"  주소: {info.get('address') or '-'}")
+        name = info.get("name", result.get("complex_id"))
+        address = info.get("address") or "-"
+        lines.append(f"- {name}")
+        lines.append(f"  · 주소: {address}")
         for trade_type, meta in result.get("market_summary", {}).items():
-            min_price = PriceConverter.to_string(meta["min_price"]) if meta.get("min_price") else "-"
-            max_price = PriceConverter.to_string(meta["max_price"]) if meta.get("max_price") else "-"
-            avg_price = PriceConverter.to_string(meta["avg_price"]) if meta.get("avg_price") else "-"
-            lines.append(f"  · {trade_type}: {meta.get('count', 0)}건 | 최저 {min_price} | 평균 {avg_price} | 최고 {max_price}")
+            min_price = meta.get("min_price")
+            avg_price = meta.get("avg_price")
+            max_price = meta.get("max_price")
+            lines.append(
+                f"  · {trade_type}: {meta.get('count', 0)}건 | 최저 {_brief_price(min_price)} | 평균 {_brief_price(avg_price)} | 최고 {_brief_price(max_price)}"
+            )
+            comparable_rows.append((name, trade_type, avg_price))
+
+    trade_group: dict[str, list[tuple[str, int]]] = {}
+    for name, trade_type, avg_price in comparable_rows:
+        if avg_price:
+            trade_group.setdefault(trade_type, []).append((name, avg_price))
+
+    for trade_type, rows in trade_group.items():
+        if len(rows) < 2:
+            continue
+        rows.sort(key=lambda x: x[1])
+        cheapest_name, cheapest_price = rows[0]
+        expensive_name, expensive_price = rows[-1]
+        gap = expensive_price - cheapest_price
+        if gap > 0:
+            lines.append(
+                f"- 한줄 해석 ({trade_type}): {cheapest_name} 쪽이 가장 낮고, {expensive_name} 쪽이 가장 높습니다. 평균 기준 격차는 {_brief_price(gap)} 정도입니다."
+            )
     return "\n".join(lines)
+
+
+def run_query(
+    *,
+    query: str | None,
+    complex_id: str | None,
+    url: str | None,
+    trade_types: list[str] | None,
+    pages: int,
+    limit: int,
+    candidate_limit: int,
+    min_pyeong: float | None,
+    max_pyeong: float | None,
+    compare: bool,
+) -> dict[str, Any]:
+    parsed = parse_natural_query(query or "") if query else None
+    trade_types = list(trade_types or [])
+    if not trade_types:
+        trade_types = parsed.trade_types if parsed else ["전세"]
+    min_pyeong = min_pyeong if min_pyeong is not None else (parsed.min_pyeong if parsed else None)
+    max_pyeong = max_pyeong if max_pyeong is not None else (parsed.max_pyeong if parsed else None)
+
+    complex_ids = resolve_complex_ids(query, complex_id, url, candidate_limit=max(1, candidate_limit))
+    if not complex_ids:
+        raise SearchError("단지 ID를 찾지 못했습니다. 더 구체적인 단지명/지역명을 주거나 단지 URL/ID를 직접 넣어 주세요.")
+
+    compare_mode = compare or bool(parsed and parsed.compare_mode and len(complex_ids) >= 2)
+    target_ids = complex_ids[: max(1, candidate_limit if compare_mode else 1)]
+
+    if compare_mode:
+        results = []
+        for cid in target_ids:
+            items = fetch_articles(cid, trade_types, pages=max(1, pages))
+            items = filter_items(items, min_pyeong, max_pyeong, max(1, limit))
+            results.append(
+                {
+                    "complex_id": cid,
+                    "complex_info": fetch_complex_info(cid),
+                    "trade_types": trade_types,
+                    "count": len(items),
+                    "market_summary": build_market_summary(items),
+                    "items": items[:5],
+                }
+            )
+        return {
+            "query": query,
+            "parsed": asdict(parsed) if parsed else None,
+            "compare_mode": True,
+            "results": results,
+        }
+
+    selected_complex_id = target_ids[0]
+    items = fetch_articles(selected_complex_id, trade_types, pages=max(1, pages))
+    items = filter_items(items, min_pyeong, max_pyeong, max(1, limit))
+    return {
+        "query": query,
+        "parsed": asdict(parsed) if parsed else None,
+        "selected_complex_id": selected_complex_id,
+        "complex_info": fetch_complex_info(selected_complex_id),
+        "trade_types": trade_types,
+        "count": len(items),
+        "market_summary": build_market_summary(items),
+        "items": items,
+    }
 
 
 def run_self_test() -> int:
@@ -342,9 +542,13 @@ def run_self_test() -> int:
     assert "전세" in parsed.trade_types
     assert parsed.min_pyeong is not None and parsed.max_pyeong is not None
     assert len(parsed.candidate_keywords) >= 2
+    assert "잠실" in parsed.location_hints
+
+    score = _score_candidate({"name": "잠실리센츠", "address": "서울시 송파구 잠실동", "household_count": 5563}, "리센츠", parsed)
+    assert score > 0
 
     print("SELF_TEST_OK")
-    print(json.dumps({"sample_row": row, "parsed_query": asdict(parsed)}, ensure_ascii=False, indent=2)[:1200])
+    print(json.dumps({"sample_row": row, "parsed_query": asdict(parsed), "sample_score": score}, ensure_ascii=False, indent=2)[:1600])
     return 0
 
 
@@ -378,11 +582,6 @@ def main() -> int:
         return 0
 
     trade_types = [token.strip() for token in str(args.trade_types).split(",") if token.strip()]
-    if not trade_types:
-        trade_types = parsed.trade_types if parsed else ["전세"]
-
-    min_pyeong = args.min_pyeong if args.min_pyeong is not None else (parsed.min_pyeong if parsed else None)
-    max_pyeong = args.max_pyeong if args.max_pyeong is not None else (parsed.max_pyeong if parsed else None)
 
     if args.list_candidates:
         if not args.query:
@@ -391,58 +590,25 @@ def main() -> int:
         print(json.dumps({"query": args.query, "parsed": asdict(parsed), "candidates": candidates}, ensure_ascii=False, indent=2))
         return 0
 
-    complex_ids = resolve_complex_ids(args.query, args.complex_id, args.url, candidate_limit=max(1, args.candidate_limit))
-    if not complex_ids:
-        raise SystemExit("단지 ID를 찾지 못했습니다. 더 구체적인 단지명/지역명을 주거나 단지 URL/ID를 직접 넣어 주세요.")
-
-    compare_mode = args.compare or bool(parsed and parsed.compare_mode and len(complex_ids) >= 2)
-    target_ids = complex_ids[: max(1, args.candidate_limit if compare_mode else 1)]
-
-    if compare_mode:
-        results = []
-        for cid in target_ids:
-            items = fetch_articles(cid, trade_types, pages=max(1, args.pages))
-            items = filter_items(items, min_pyeong, max_pyeong, max(1, args.limit))
-            results.append(
-                {
-                    "complex_id": cid,
-                    "complex_info": fetch_complex_info(cid),
-                    "trade_types": trade_types,
-                    "count": len(items),
-                    "market_summary": build_market_summary(items),
-                    "items": items[:5],
-                }
-            )
-        payload = {
-            "query": args.query,
-            "parsed": asdict(parsed) if parsed else None,
-            "compare_mode": True,
-            "results": results,
-        }
-        if args.json:
-            print(json.dumps(payload, ensure_ascii=False, indent=2))
-        else:
-            print(summarize_comparison(results))
-        return 0
-
-    selected_complex_id = target_ids[0]
-    items = fetch_articles(selected_complex_id, trade_types, pages=max(1, args.pages))
-    items = filter_items(items, min_pyeong, max_pyeong, max(1, args.limit))
-
-    output = {
-        "query": args.query,
-        "parsed": asdict(parsed) if parsed else None,
-        "selected_complex_id": selected_complex_id,
-        "complex_info": fetch_complex_info(selected_complex_id),
-        "trade_types": trade_types,
-        "count": len(items),
-        "market_summary": build_market_summary(items),
-        "items": items,
-    }
+    output = run_query(
+        query=args.query,
+        complex_id=args.complex_id,
+        url=args.url,
+        trade_types=trade_types,
+        pages=max(1, args.pages),
+        limit=max(1, args.limit),
+        candidate_limit=max(1, args.candidate_limit),
+        min_pyeong=args.min_pyeong,
+        max_pyeong=args.max_pyeong,
+        compare=bool(args.compare),
+    )
     if args.json:
         print(json.dumps(output, ensure_ascii=False, indent=2))
     else:
-        print(summarize(items))
+        if output.get("compare_mode"):
+            print(summarize_comparison(output.get("results", [])))
+        else:
+            print(summarize(output.get("items", [])))
     return 0
 
 
