@@ -24,7 +24,9 @@ python skills/naver-real-estate-search/scripts/build_candidate_seeds.py --input 
 - 출력: `references/candidate-seeds.generated.json`
 - 생성 결과의 `entries[]`는 `search_real_estate.py --seed-candidate-file <path>`로 바로 warm-cache 가능
 - 각 결과에는 `confidence`, `verification_status`, 자동 생성 `aliases`, `candidate_pool`, `evidence`, `blocked_reasons`가 포함됨
-- 현재 네이버 검색/상세 API의 403/429 영향이 있어, 자동 생성 결과는 **verified/weak-verified만 운영 seed로 승격**하는 것을 권장
+- 현재 네이버 검색/상세 API의 403/429 영향이 있어, 자동 생성 결과는 **초안**으로 보고 `candidate-seeds.json`의 운영 검수 기준을 다시 통과한 항목만 seed로 승격합니다.
+- 2026-03-20 검수 기준상 `리센츠`만 운영 유지했고, `엘스`/`트리지움`은 오검출(리센츠 1147로 잘못 수렴) 때문에 제외했습니다.
+- `은마`, `래미안대치팰리스`, `아크로리버파크`, `래미안원베일리`, `목동신시가지7단지`, `신월시영아파트`는 manual review queue로 넘겼습니다.
 
 ## 스크립트
 
@@ -61,11 +63,26 @@ python skills/naver-real-estate-search/scripts/search_real_estate.py --show-cach
 ```
 
 - 반복 조회가 필요한 실존 단지는 먼저 cache에 seed/학습시켜 두면 alias mismatch와 cold-start 실패를 줄일 수 있습니다.
-- `references/candidate-seeds.json`은 팀/운영 환경에서 자주 쓰는 단지를 미리 넣어두는 용도입니다.
-- 예시로 `신월시영아파트` alias seed 형태도 포함했지만, 실제 운영용 complex ID는 검증 후 교체하세요.
+- `references/candidate-seeds.json`은 **운영 검수 통과 seed만 넣는 파일**입니다.
+- generated 초안 검토 결과, 오검출/미검증 항목은 `manual_review_queue`로 분리하고 `entries[]`에는 넣지 않습니다.
+- 특히 `신월시영아파트`, `은마`, `목동신시가지7단지`처럼 alias나 숫자 단지명이 흔들리는 케이스는 direct complex URL/ID 확보 전까지 운영 seed로 올리지 않는 편이 안전합니다.
+
+## seed 검수 기준 요약
+- `verified`: 이름/주소/ID 정합성이 맞아 운영 seed에 바로 반영 가능
+- `weak-verified`: 자동 근거는 있으나 사람이 한 번 더 보고 승격
+- `unresolved`: complex_id 미확보 또는 근거 부족, 운영 seed 제외
+- `blocked`: 403/429 등 외부 차단으로 검증 중단, direct URL/ID 수동 확보 우선
+
+서울 주요 단지 보강 우선순위:
+1. 신월시영아파트
+2. 은마 / 래미안대치팰리스
+3. 래미안원베일리 / 아크로리버파크
+4. 목동신시가지7단지
+5. 엘스 / 트리지움
 
 ## 배포 체크리스트
 1. self-test 실행
 2. 대표 자연어 질의/후보 탐색/감시 check 실제 실행
-3. skill 패키징
-4. GitHub tag/release 및 ClawHub publish
+3. `references/candidate-seeds.json`의 entries/manual_review_queue가 검수 결과와 일치하는지 확인
+4. skill 패키징
+5. GitHub tag/release 및 ClawHub publish
