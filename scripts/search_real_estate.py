@@ -52,6 +52,7 @@ SIMPLE_KOREAN_TOKEN_RE = re.compile(r"[가-힣A-Za-z0-9]{2,}")
 WATCH_STATE_FILE = WORKSPACE / "skills" / "naver-real-estate-search" / "data" / "watch-rules.json"
 CANDIDATE_CACHE_FILE = WORKSPACE / "skills" / "naver-real-estate-search" / "data" / "candidate-cache.json"
 DEFAULT_CANDIDATE_SEED_FILE = WORKSPACE / "skills" / "naver-real-estate-search" / "references" / "candidate-seeds.json"
+DEFAULT_SEED_INPUT_FILE = WORKSPACE / "skills" / "naver-real-estate-search" / "references" / "seoul-major-complexes.seed-input.json"
 APT_SUFFIX_RE = re.compile(r"(?:아파트|맨션|타운하우스|주상복합|오피스텔|빌라)$")
 AREA_RANGE_RE = re.compile(r"(\d{1,2})\s*평\s*[~-]\s*(\d{1,2})\s*평")
 AREA_BAND_RE = re.compile(r"(\d{1,2})\s*평대")
@@ -513,6 +514,84 @@ def seed_candidate_from_file(path: str | Path | None = None) -> dict[str, Any]:
     return {"path": str(target), "saved_count": len(saved), "saved": saved}
 
 
+def _load_reference_seed_rows() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    target = _read_json_file(DEFAULT_CANDIDATE_SEED_FILE, {"entries": [], "manual_review_queue": []})
+    if isinstance(target, dict):
+        for row in target.get("entries") or []:
+            rows.append({**row, "reference_kind": "production-entry"})
+        for row in target.get("manual_review_queue") or []:
+            rows.append({**row, "reference_kind": "manual-review"})
+    seed_input = _read_json_file(DEFAULT_SEED_INPUT_FILE, {"seeds": []})
+    if isinstance(seed_input, dict):
+        for row in seed_input.get("seeds") or []:
+            rows.append({**row, "reference_kind": "seed-input"})
+    return rows
+
+
+def search_reference_candidates(query: str, *, candidate_limit: int = 5, parsed: ParsedQuery | None = None) -> list[dict[str, Any]]:
+    parsed = parsed or parse_natural_query(query)
+    terms: list[str] = []
+    for value in [query, parsed.cleaned_query, *parsed.candidate_keywords, *parsed.raw_subjects]:
+        for variant in expand_alias_variants(value):
+            norm = normalize_complex_alias(variant)
+            if norm and norm not in terms:
+                terms.append(norm)
+    if not terms:
+        return []
+
+    scored: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for row in _load_reference_seed_rows():
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        aliases = [str(x) for x in (row.get("aliases") or []) if str(x).strip()]
+        bag = [name, *aliases, row.get("district") or "", row.get("neighborhood") or "", row.get("address") or ""]
+        bag_norms = [normalize_complex_alias(x) for x in bag if str(x or "").strip()]
+        local_score = 0
+        for term in terms:
+            if term in bag_norms:
+                local_score = max(local_score, 240)
+            elif any(term and term in norm for norm in bag_norms):
+                local_score = max(local_score, 170)
+        if local_score <= 0:
+            continue
+        key = str(row.get("complex_id") or f"hint:{normalize_complex_alias(name)}:{row.get('reference_kind')}")
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        reference_score = local_score + _score_candidate(
+            {
+                "name": name,
+                "address": row.get("address") or " ".join(filter(None, [row.get("district"), row.get("neighborhood")])),
+                "household_count": row.get("household_count"),
+                "aliases": aliases,
+            },
+            query,
+            parsed,
+        )
+        scored.append(
+            {
+                "complex_id": str(row.get("complex_id") or ""),
+                "name": name,
+                "address": row.get("address") or " ".join(filter(None, [row.get("district"), row.get("neighborhood")])),
+                "household_count": row.get("household_count"),
+                "aliases": aliases[:20],
+                "match_score": reference_score,
+                "source_term": row.get("reference_kind") or "reference-seed",
+                "source": "reference-seed",
+                "reference_kind": row.get("reference_kind"),
+                "review_status": row.get("review_status"),
+                "verification_status": row.get("verification_status"),
+                "next_action": row.get("next_action"),
+                "note": row.get("note") or row.get("reason"),
+            }
+        )
+    scored.sort(key=lambda row: (-int(row.get("match_score") or 0), str(row.get("name") or ""), str(row.get("complex_id") or "")))
+    return scored[:candidate_limit]
+
+
 def search_cached_candidates(query: str, *, candidate_limit: int = 5, parsed: ParsedQuery | None = None) -> list[dict[str, Any]]:
     parsed = parsed or parse_natural_query(query)
     cache = _read_candidate_cache().get("entries") or []
@@ -593,11 +672,19 @@ def search_complex_candidates(query: str, *, candidate_limit: int = 5) -> list[d
     parsed = parse_natural_query(query)
     merged: dict[str, dict[str, Any]] = {}
 
+    def _merge_item(item: dict[str, Any]) -> None:
+        key = str(item.get("complex_id") or "").strip() or f"hint:{normalize_complex_alias(item.get('name') or '')}:{item.get('source') or item.get('reference_kind') or 'unknown'}"
+        prev = merged.get(key)
+        if not prev or int(item.get("match_score") or 0) >= int(prev.get("match_score") or 0):
+            merged[key] = dict(item)
+
     for item in search_cached_candidates(query, candidate_limit=max(candidate_limit * 2, 8), parsed=parsed):
-        merged[str(item.get("complex_id"))] = dict(item)
+        _merge_item(item)
+    for item in search_reference_candidates(query, candidate_limit=max(candidate_limit * 2, 8), parsed=parsed):
+        _merge_item(item)
 
     raw_ids: list[tuple[str, str]] = []
-    seen_ids: set[str] = set(merged.keys())
+    seen_ids: set[str] = {str(row.get("complex_id") or "") for row in merged.values() if str(row.get("complex_id") or "").strip()}
     for term in build_search_terms(parsed):
         try:
             web_items = extract_complex_candidates_from_web(term, limit=max(candidate_limit * 2, 8))
@@ -886,6 +973,8 @@ def run_self_test() -> int:
     assert cached and cached[0]["complex_id"] == "777"
     assert saved and any(row["complex_id"] == "778" for row in saved)
     assert list_candidate_cache(limit=5, keyword="리센츠")
+    ref_candidates = search_reference_candidates("서울 양천구 신월동 신월시영아파트 전세", candidate_limit=3)
+    assert ref_candidates and normalize_complex_alias(ref_candidates[0]["name"]) == "신월시영"
     _write_candidate_cache(backup_cache)
 
     score = _score_candidate({"name": "잠실리센츠", "address": "서울시 송파구 잠실동", "household_count": 5563}, "리센츠", parsed)

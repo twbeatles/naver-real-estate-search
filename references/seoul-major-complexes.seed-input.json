@@ -67,6 +67,14 @@
       "neighborhood": "신월동",
       "aliases": ["신월시영", "양천 신월시영"],
       "note": "tricky alias 케이스"
+    },
+    {
+      "name": "답십리두산위브",
+      "city": "서울특별시",
+      "district": "동대문구",
+      "neighborhood": "답십리동",
+      "aliases": ["두산위브", "답십리 두산위브", "답십리두산위브아파트"],
+      "note": "실사용 자연어 질의 fallback 강화용. complex ID 수동 확보 전까지 reference seed로 운영"
     }
   ]
 }

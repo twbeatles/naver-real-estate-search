@@ -85,6 +85,14 @@
       "review_status": "blocked-but-high-priority",
       "reason": "403 차단으로 generated가 막혔다. 다만 alias 난이도가 높아서 운영상 seed 가치가 크다.",
       "next_action": "신월시영 complex URL/ID를 수동 확보해 최우선으로 baseline seed에 추가한다."
+    },
+    {
+      "name": "답십리두산위브",
+      "district": "동대문구",
+      "neighborhood": "답십리동",
+      "review_status": "manual-verification-needed",
+      "reason": "실사용 질의 빈도가 높은데 현재 production seed/candidate-cache에 없음. 네이버 complex ID를 아직 수동 확정하지 못했다.",
+      "next_action": "direct complex URL/ID를 확보하면 production seed로 승격하고, 그 전까지는 reference seed fallback으로 후보 탐색 응답을 보강한다."
     }
   ],
   "review_summary": {
@@ -101,10 +109,12 @@
       "아크로리버파크",
       "래미안원베일리",
       "목동신시가지7단지",
-      "신월시영아파트"
+      "신월시영아파트",
+      "답십리두산위브"
     ],
     "priority_backfill_targets": [
       "신월시영아파트",
+      "답십리두산위브",
       "은마",
       "래미안대치팰리스",
       "래미안원베일리",
