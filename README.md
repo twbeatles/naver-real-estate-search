@@ -14,7 +14,9 @@
 - watch schema 확장: `last_seen`, `events`, dedupe, 새 매물/가격하락 감지
 - 상위 레이어(텔레그램/브리핑) 연동용 stdout JSON 구조 개선
 
-## candidate seed 자동 생성
+## candidate seed 운영 흐름
+
+### 1) generated 초안 만들기
 ```bash
 python skills/naver-real-estate-search/scripts/build_candidate_seeds.py --print-summary
 python skills/naver-real-estate-search/scripts/build_candidate_seeds.py --input skills/naver-real-estate-search/references/seoul-major-complexes.seed-input.json --output skills/naver-real-estate-search/references/candidate-seeds.generated.json --pause 0.1 --print-summary
@@ -22,11 +24,33 @@ python skills/naver-real-estate-search/scripts/build_candidate_seeds.py --input 
 
 - 입력: `references/seoul-major-complexes.seed-input.json`
 - 출력: `references/candidate-seeds.generated.json`
-- 생성 결과의 `entries[]`는 `search_real_estate.py --seed-candidate-file <path>`로 바로 warm-cache 가능
-- 각 결과에는 `confidence`, `verification_status`, 자동 생성 `aliases`, `candidate_pool`, `evidence`, `blocked_reasons`가 포함됨
-- 현재 네이버 검색/상세 API의 403/429 영향이 있어, 자동 생성 결과는 **초안**으로 보고 `candidate-seeds.json`의 운영 검수 기준을 다시 통과한 항목만 seed로 승격합니다.
-- 2026-03-20 검수 기준상 `리센츠`만 운영 유지했고, `엘스`/`트리지움`은 오검출(리센츠 1147로 잘못 수렴) 때문에 제외했습니다.
-- `은마`, `래미안대치팰리스`, `아크로리버파크`, `래미안원베일리`, `목동신시가지7단지`, `신월시영아파트`는 manual review queue로 넘겼습니다.
+- 각 결과에는 `confidence`, `verification_status`, 자동 생성 `aliases`, `candidate_pool`, `evidence`, `blocked_reasons`가 포함됩니다.
+- 자동 생성 결과는 **운영 seed가 아니라 generated 초안**입니다.
+
+### 2) preview로 승격 후보 / 검수 큐 확인
+```bash
+python skills/naver-real-estate-search/scripts/apply_generated_seeds.py --json
+python skills/naver-real-estate-search/scripts/apply_generated_seeds.py --only-names "리센츠,은마" --json
+```
+
+- 기본 동작은 preview입니다. 파일은 바꾸지 않습니다.
+- `verified/weak-verified + complex_id + confidence` 기준으로 accepted 후보를 고릅니다.
+- 나머지는 `manual_review_queue`로 정리할 후보로 봅니다.
+- 일부 단지만 볼 때는 `--only-names`, 빼고 싶을 때는 `--exclude-names`를 씁니다.
+
+### 3) 실제 반영
+```bash
+python skills/naver-real-estate-search/scripts/apply_generated_seeds.py --apply-target --apply-cache --json
+```
+
+- `--apply-target`: `references/candidate-seeds.json` 갱신
+- `--apply-cache`: accepted 항목만 `data/candidate-cache.json` warm-cache
+- preview 없이 곧바로 apply하지 말고, 최소 한 번은 summary를 확인하는 편이 안전합니다.
+
+현재 2026-03-20 기준 운영 검수 결과:
+- 운영 유지: `리센츠`
+- 오검출 제외: `엘스`, `트리지움`
+- manual review: `은마`, `래미안대치팰리스`, `아크로리버파크`, `래미안원베일리`, `목동신시가지7단지`, `신월시영아파트`
 
 ## 스크립트
 
@@ -58,10 +82,13 @@ python skills/naver-real-estate-search/scripts/watch_real_estate.py check --json
 ## candidate-cache 관리
 ```bash
 python skills/naver-real-estate-search/scripts/search_real_estate.py --seed-candidate-file
+python skills/naver-real-estate-search/scripts/apply_generated_seeds.py --apply-target --apply-cache --json
 python skills/naver-real-estate-search/scripts/search_real_estate.py --seed-candidate --complex-id 1147 --candidate-name "리센츠" --candidate-address "서울특별시 송파구 잠실동" --candidate-aliases "잠실 리센츠,잠실리센츠"
 python skills/naver-real-estate-search/scripts/search_real_estate.py --show-cache --query "리센츠"
 ```
 
+- 운영 seed 전체를 cache에 한 번에 반영할 때는 `search_real_estate.py --seed-candidate-file`를 씁니다.
+- generated 초안에서 **accepted만 선별 반영**하려면 `apply_generated_seeds.py --apply-target --apply-cache`가 더 안전합니다.
 - 반복 조회가 필요한 실존 단지는 먼저 cache에 seed/학습시켜 두면 alias mismatch와 cold-start 실패를 줄일 수 있습니다.
 - `references/candidate-seeds.json`은 **운영 검수 통과 seed만 넣는 파일**입니다.
 - generated 초안 검토 결과, 오검출/미검증 항목은 `manual_review_queue`로 분리하고 `entries[]`에는 넣지 않습니다.

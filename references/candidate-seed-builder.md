@@ -90,6 +90,40 @@
 - `verification_status`가 `weak-verified`여도 서울 주요 단지는 수동 검수 후 승격한다.
 - 403/429가 반복되면 broad query 대신 direct complex URL/ID로 수동 보강한다.
 
+## preview / apply 운영 절차
+
+### 1. generated 초안 생성
+```bash
+python skills/naver-real-estate-search/scripts/build_candidate_seeds.py --print-summary
+```
+
+### 2. preview 확인
+```bash
+python skills/naver-real-estate-search/scripts/apply_generated_seeds.py --json
+python skills/naver-real-estate-search/scripts/apply_generated_seeds.py --only-names "리센츠,은마" --json
+```
+
+여기서 확인할 것:
+- `accepted[]`에 들어간 단지가 정말 운영 승격 대상인지
+- `rejected[]`의 `complex_id`가 오검출인지
+- `manual_review_queue_count`가 기대와 맞는지
+
+### 3. 운영 반영
+```bash
+python skills/naver-real-estate-search/scripts/apply_generated_seeds.py --apply-target --apply-cache --json
+```
+
+반영 결과:
+- `references/candidate-seeds.json`의 `entries` / `manual_review_queue` 갱신
+- accepted 항목만 `data/candidate-cache.json`에 warm-cache
+
+### 4. 수동 보강
+자동 승격이 어려운 단지는 direct complex URL/ID 확보 후 다음처럼 수동 보강한다.
+
+```bash
+python skills/naver-real-estate-search/scripts/search_real_estate.py --seed-candidate --complex-id <ID> --candidate-name "단지명" --candidate-address "주소" --candidate-aliases "별칭1,별칭2"
+```
+
 ## 실제 검수 요약 (2026-03-20)
 
 ### 운영 반영
