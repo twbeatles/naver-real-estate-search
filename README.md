@@ -5,6 +5,7 @@
 ## 주요 개선점
 - alias/후보 캐시 구조 강화 (`candidate-cache.json` v3 스타일)
 - candidate-cache seed/수동 학습 CLI 추가 (`--seed-candidate`, `--seed-candidate-file`, `--show-cache`)
+- 서울 주요 단지용 candidate seed 자동 생성기 추가 (`scripts/build_candidate_seeds.py`)
 - 지역명/단지명 파서 보강, cold-start 후보 탐색 품질 개선
 - `신월시영아파트` 같은 축약/별칭 케이스 보강
 - 429 감지 시 direct URL/complex ID 우선 흐름을 유지하는 fallback 메타 추가
@@ -12,6 +13,18 @@
 - 한국어 비교 브리핑과 대표 매물 요약 개선
 - watch schema 확장: `last_seen`, `events`, dedupe, 새 매물/가격하락 감지
 - 상위 레이어(텔레그램/브리핑) 연동용 stdout JSON 구조 개선
+
+## candidate seed 자동 생성
+```bash
+python skills/naver-real-estate-search/scripts/build_candidate_seeds.py --print-summary
+python skills/naver-real-estate-search/scripts/build_candidate_seeds.py --input skills/naver-real-estate-search/references/seoul-major-complexes.seed-input.json --output skills/naver-real-estate-search/references/candidate-seeds.generated.json --pause 0.1 --print-summary
+```
+
+- 입력: `references/seoul-major-complexes.seed-input.json`
+- 출력: `references/candidate-seeds.generated.json`
+- 생성 결과의 `entries[]`는 `search_real_estate.py --seed-candidate-file <path>`로 바로 warm-cache 가능
+- 각 결과에는 `confidence`, `verification_status`, 자동 생성 `aliases`, `candidate_pool`, `evidence`, `blocked_reasons`가 포함됨
+- 현재 네이버 검색/상세 API의 403/429 영향이 있어, 자동 생성 결과는 **verified/weak-verified만 운영 seed로 승격**하는 것을 권장
 
 ## 스크립트
 
