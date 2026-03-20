@@ -1,4 +1,4 @@
-# naver-real-estate-search
+﻿# naver-real-estate-search
 
 네이버 부동산 기반으로 대한민국 **매물 검색 / 단지 후보 탐색 / 비교 브리핑 / 가격 감시**를 수행하는 OpenClaw 스킬입니다.
 
@@ -434,3 +434,4 @@ watch rule은 다음 정보와 잘 결합됩니다.
 - `references/seoul-major-complexes.seed-input.json`
 
 GitHub Releases: <https://github.com/twbeatles/naver-real-estate-search/releases>
+

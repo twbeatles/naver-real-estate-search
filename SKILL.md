@@ -1,6 +1,6 @@
 ---
 name: naver-real-estate-search
-description: Search 네이버 부동산 listings and 단지 candidates for 대한민국 real-estate requests such as 강남 아파트 전세 시세 찾기, 특정 지역 매매/전세/월세 비교, 조건에 맞는 매물 리스트 정리, 단지 후보 찾기, and 자연어 기반 단지 비교/시세 요약. Use when the user wants Korean property listings, price ranges, Jeonse/monthly-rent comparisons, apartment/빌라 listing summaries, 지역명/단지명 기반 단지 후보 탐색, 여러 단지 비교 리포트, 자연어 채팅형 부동산 브리핑, 목표가/새 매물/가격하락 감시 초안, or 텔레그램 등 상위 레이어에 붙일 JSON/stdout 친화 결과 from Naver Real Estate. Prefer direct 단지 URL or complex ID first when rate-limited; otherwise use the natural-language wrapper and narrow to 1~3 candidate complexes before broad scans.
+description: Search, compare, and monitor 대한민국 property listings from 네이버 부동산 with natural-language queries. Use when the user wants 강남 아파트 전세 시세 찾기, 특정 지역 매매/전세/월세 비교, 조건에 맞는 매물 리스트 정리, 단지 후보 찾기, 여러 단지 비교 리포트, 자연어 채팅형 부동산 브리핑, or 목표가/새 매물/가격하락 감시 초안. Supports Korean property tasks such as apartment/빌라 listing summaries, 지역명/단지명 기반 단지 후보 탐색, same-area comparison, candidate seed/candidate cache workflows, and stdout/JSON results that can be connected to Telegram or higher-level briefings. Prefer direct 단지 URL or complex ID first when rate-limited; otherwise use the natural-language wrapper and narrow to 1~3 candidate complexes before broad scans.
 ---
 
 # Naver Real Estate Search
