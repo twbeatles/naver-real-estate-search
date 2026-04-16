@@ -130,3 +130,17 @@ python skills/naver-real-estate-search/scripts/search_real_estate.py --show-cach
 3. `references/candidate-seeds.json`의 entries/manual_review_queue가 검수 결과와 일치하는지 확인
 4. skill 패키징
 5. GitHub tag/release 및 ClawHub publish
+
+## 다음 고도화 메모
+
+- 현재 `browser_session_helper.py` 는 direct URL/ID 확보와 same-origin 보조 fetch에 집중한다.
+- 다음 단계 후보는 이 helper 결과를 `search_real_estate.py` / `watch_real_estate.py` 의 선택적 fallback으로 연결하는 것이다.
+- 다만 기본 원칙은 그대로다.
+  - broad query가 정상 동작하면 기존 흐름 우선
+  - 403/429 또는 unresolved direct ID 상황에서만 browser-assisted 흐름 사용
+  - 자동 fallback을 붙이더라도 과도한 브라우저 의존으로 기본 CLI가 무거워지지 않게 유지
+
+운영 검토 포인트:
+- fallback 트리거 조건을 너무 넓게 잡지 않기
+- browser profile / storage state 같은 로컬 세션 파일은 git 추적 대상에서 계속 제외하기
+- 사람이 직접 확보한 canonical complex URL을 candidate seed/lookup 흐름으로 쉽게 승격할 수 있게 유지하기
