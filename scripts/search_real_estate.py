@@ -13,6 +13,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+BROWSER_FALLBACK_IMPORT_ERROR: Exception | None = None
+
 WORKSPACE = Path(__file__).resolve().parents[3]
 UPSTREAM = WORKSPACE / "tmp" / "naverland-scrapper"
 SRC_ROOT = UPSTREAM / "src"
@@ -210,6 +212,72 @@ def _request_text(url: str) -> str:
         if exc.code in {403, 429}:
             raise SearchError(f"네이버 검색 HTML 후보 탐색이 차단되었습니다: HTTP {exc.code}")
         raise
+
+
+def _load_browser_helper() -> tuple[Any, Any]:
+    global BROWSER_FALLBACK_IMPORT_ERROR
+    try:
+        from browser_session_helper import browser_fetch, canonical_complex_url
+        return browser_fetch, canonical_complex_url
+    except Exception as exc:
+        BROWSER_FALLBACK_IMPORT_ERROR = exc
+        raise SearchError(f"browser fallback helper를 불러오지 못했습니다: {exc}") from exc
+
+
+def _area_to_pyeong(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except Exception:
+        return None
+    if number <= 0:
+        return None
+    return round(number / 3.305785, 2)
+
+
+def _browser_fetch_bundle(complex_id: str, trade_types: list[str], pages: int) -> dict[str, Any]:
+    browser_fetch, canonical_complex_url = _load_browser_helper()
+    payload = browser_fetch(
+        complex_id=complex_id,
+        profile_dir=Path(WORKSPACE / "playwright_profile" / "naver-real-estate-search"),
+        headless=True,
+        trade_types=trade_types,
+        page_count=max(1, pages),
+    )
+    detail = payload.get("detail") or {}
+    complex_name = str(detail.get("complexName") or detail.get("complexNm") or f"단지_{complex_id}")
+    address = " ".join(filter(None, [str(detail.get("cortarAddress") or "").strip(), str(detail.get("roadAddressPrefix") or "").strip()])).strip()
+    info = {
+        "complex_id": complex_id,
+        "name": complex_name,
+        "address": address,
+        "household_count": detail.get("totalHouseHoldCount") or detail.get("houseHoldCount"),
+        "complex_url": canonical_complex_url(complex_id),
+    }
+    items: list[dict[str, Any]] = []
+    for row in payload.get("articles") or []:
+        trade_type = str(row.get("trade_type") or "").strip() or "전세"
+        price_text = str(row.get("price_text") or "-")
+        price_int = PriceConverter.to_int(price_text)
+        monthly_rent = str(row.get("monthly_rent") or "").strip()
+        item = {
+            "단지명": complex_name,
+            "거래유형": trade_type,
+            "매매가": price_text if trade_type == "매매" else "",
+            "보증금": price_text if trade_type != "매매" else "",
+            "월세": monthly_rent if trade_type == "월세" else "",
+            "면적(평)": _area_to_pyeong(row.get("area")),
+            "층/방향": " / ".join([part for part in [str(row.get("floor_info") or "").strip(), str(row.get("direction") or "").strip()] if part]) or "-",
+            "특징": "browser-assisted-fetch",
+            "매물URL": row.get("article_url"),
+            "매물ID": row.get("article_no"),
+            "자산유형": "APT",
+            "complex_id": complex_id,
+            "article_key": f"{complex_id}:{row.get('article_no') or ''}",
+            "price_int": price_int,
+        }
+        items.append(item)
+    remember_candidate(info)
+    return {"complex_info": info, "items": items, "raw": payload}
 
 
 def _read_json_file(path: Path, default: Any) -> Any:
@@ -444,18 +512,25 @@ def extract_complex_candidates_from_web(query: str, limit: int = 5) -> list[dict
 
 
 def fetch_complex_info(complex_id: str) -> dict[str, Any]:
-    payload = _request_json(COMPLEX_DETAIL_URL.format(complex_id=complex_id))
-    info = payload.get("complexDetail") or payload
-    address = " ".join(filter(None, [str(info.get("cortarAddress") or "").strip(), str(info.get("roadAddressPrefix") or "").strip()])).strip()
-    result = {
-        "complex_id": complex_id,
-        "name": str(info.get("complexName") or info.get("complexNm") or f"단지_{complex_id}"),
-        "address": address,
-        "household_count": info.get("totalHouseHoldCount") or info.get("houseHoldCount"),
-        "complex_url": f"https://new.land.naver.com/complexes/{complex_id}",
-    }
-    remember_candidate(result)
-    return result
+    try:
+        payload = _request_json(COMPLEX_DETAIL_URL.format(complex_id=complex_id))
+        info = payload.get("complexDetail") or payload
+        address = " ".join(filter(None, [str(info.get("cortarAddress") or "").strip(), str(info.get("roadAddressPrefix") or "").strip()])).strip()
+        result = {
+            "complex_id": complex_id,
+            "name": str(info.get("complexName") or info.get("complexNm") or f"단지_{complex_id}"),
+            "address": address,
+            "household_count": info.get("totalHouseHoldCount") or info.get("houseHoldCount"),
+            "complex_url": f"https://new.land.naver.com/complexes/{complex_id}",
+        }
+        remember_candidate(result)
+        return result
+    except SearchError:
+        browser_bundle = _browser_fetch_bundle(complex_id, ["전세"], 1)
+        result = dict(browser_bundle.get("complex_info") or {})
+        result["source"] = "browser-assisted-fallback"
+        remember_candidate(result)
+        return result
 
 
 def _tokenize_for_match(text: str) -> list[str]:
@@ -809,21 +884,30 @@ def fetch_articles(complex_id: str, trade_types: list[str], pages: int = 1) -> l
     trade_codes = ":".join(TRADE_CODE_MAP[t] for t in trade_types if t in TRADE_CODE_MAP)
     if not trade_codes:
         trade_codes = "A1:B1:B2"
-    complex_name = NaverURLParser.fetch_complex_name(complex_id)
-    items: list[dict[str, Any]] = []
-    for page in range(1, pages + 1):
-        payload = _request_json(COMPLEX_ARTICLE_URL.format(complex_id=complex_id, trade_codes=trade_codes, page=page))
-        article_list = payload.get("articleList") or payload.get("list") or []
-        if not article_list:
-            break
-        for article in article_list:
-            trade_type = str(article.get("tradeTypeName") or article.get("tradTpNm") or "").strip()
-            normalized = normalize_article_payload(article, complex_name, complex_id, requested_trade_type=trade_type)
-            normalized["매물URL"] = get_article_url(complex_id, normalized.get("매물ID", ""), normalized.get("자산유형", "APT"))
-            normalized["complex_id"] = complex_id
-            normalized["article_key"] = f"{complex_id}:{normalized.get('매물ID', '')}"
-            items.append(normalized)
-    return items
+    try:
+        complex_name = NaverURLParser.fetch_complex_name(complex_id)
+        items: list[dict[str, Any]] = []
+        for page in range(1, pages + 1):
+            payload = _request_json(COMPLEX_ARTICLE_URL.format(complex_id=complex_id, trade_codes=trade_codes, page=page))
+            article_list = payload.get("articleList") or payload.get("list") or []
+            if not article_list:
+                break
+            for article in article_list:
+                trade_type = str(article.get("tradeTypeName") or article.get("tradTpNm") or "").strip()
+                normalized = normalize_article_payload(article, complex_name, complex_id, requested_trade_type=trade_type)
+                normalized["매물URL"] = get_article_url(complex_id, normalized.get("매물ID", ""), normalized.get("자산유형", "APT"))
+                normalized["complex_id"] = complex_id
+                normalized["article_key"] = f"{complex_id}:{normalized.get('매물ID', '')}"
+                items.append(normalized)
+        return items
+    except Exception as exc:
+        browser_bundle = _browser_fetch_bundle(complex_id, trade_types, pages)
+        items = browser_bundle.get("items") or []
+        if items:
+            RATE_LIMIT_STATE["active"] = True
+            RATE_LIMIT_STATE["last_error"] = f"browser-assisted-fallback:{type(exc).__name__}"
+            return items
+        raise
 
 
 def filter_items(items: list[dict[str, Any]], min_pyeong: float | None, max_pyeong: float | None, limit: int) -> list[dict[str, Any]]:
@@ -997,7 +1081,7 @@ def run_query(*, query: str | None, complex_id: str | None, url: str | None, tra
 
     compare_mode = compare or bool(parsed and parsed.compare_mode and len(complex_ids) >= 2)
     target_ids = complex_ids[: max(1, candidate_limit if compare_mode else 1)]
-    meta = {"rate_limited": bool(RATE_LIMIT_STATE.get("active")), "rate_limit_message": RATE_LIMIT_STATE.get("last_error")}
+    meta = {"rate_limited": bool(RATE_LIMIT_STATE.get("active")), "rate_limit_message": RATE_LIMIT_STATE.get("last_error"), "browser_fallback_used": False}
 
     if compare_mode:
         results = []
@@ -1018,11 +1102,14 @@ def run_query(*, query: str | None, complex_id: str | None, url: str | None, tra
     selected_complex_id = target_ids[0]
     items = fetch_articles(selected_complex_id, trade_types, pages=max(1, pages))
     items = filter_items(items, min_pyeong, max_pyeong, max(1, limit))
+    complex_info = fetch_complex_info(selected_complex_id)
+    if complex_info.get("source") == "browser-assisted-fallback" or str(RATE_LIMIT_STATE.get("last_error") or "").startswith("browser-assisted-fallback"):
+        meta["browser_fallback_used"] = True
     return {
         "query": query,
         "parsed": asdict(parsed) if parsed else None,
         "selected_complex_id": selected_complex_id,
-        "complex_info": fetch_complex_info(selected_complex_id),
+        "complex_info": complex_info,
         "trade_types": trade_types,
         "count": len(items),
         "market_summary": build_market_summary(items),
