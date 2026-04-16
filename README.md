@@ -9,6 +9,8 @@
 - 지역명/단지명 파서 보강, cold-start 후보 탐색 품질 개선
 - `신월시영아파트`, `답십리두산위브` 같은 실사용 질의에 대해 reference-seed/manual-review fallback 보강
 - 429 감지 시 direct URL/complex ID 우선 흐름을 유지하는 fallback 메타 추가
+- Playwright persistent profile 기반 local browser helper 추가 (`browser_session_helper.py`)
+- direct URL/ID UX 개선: `--resolve-direct`, `--lookup-complex`, 후보 출력의 canonical direct URL 노출
 - 동일 평형 기준 비교 요약 추가
 - 한국어 비교 브리핑과 대표 매물 요약 개선
 - watch schema 확장: `last_seen`, `events`, dedupe, 새 매물/가격하락 감지
@@ -55,6 +57,19 @@ python skills/naver-real-estate-search/scripts/apply_generated_seeds.py --apply-
 > 실사용 안정화 메모: production complex ID를 아직 못 확보한 단지도 `manual_review_queue` + `seoul-major-complexes.seed-input.json`에 남겨 두면, `--list-candidates`에서 완전 빈 응답 대신 **reference-seed 후보 힌트**를 돌려줄 수 있습니다.
 
 ## 스크립트
+
+### 0) direct URL/ID 정리 + 브라우저 보조
+```bash
+python skills/naver-real-estate-search/scripts/search_real_estate.py --query "complex 1147 리센츠" --resolve-direct
+python skills/naver-real-estate-search/scripts/search_real_estate.py --url "https://new.land.naver.com/complexes/1147" --lookup-complex
+python skills/naver-real-estate-search/scripts/browser_session_helper.py resolve --text "https://new.land.naver.com/complexes/1147"
+python skills/naver-real-estate-search/scripts/browser_session_helper.py capture --url "https://new.land.naver.com/complexes/1147" --wait-seconds 10
+python skills/naver-real-estate-search/scripts/browser_session_helper.py fetch --url "https://new.land.naver.com/complexes/1147" --trade-types 전세 --pages 1 --headless
+```
+
+- `capture`: 로컬 브라우저를 열고 현재 URL/HTML에서 complex ID를 잡습니다.
+- `fetch`: 브라우저 same-origin 세션에서 detail/articles JSON을 보조 조회합니다.
+- broad query가 막힐 때 direct URL/ID 확보용 보조 흐름으로 쓰는 것이 핵심입니다.
 
 ### 1) 후보 탐색 / 단일 조회 / 비교
 ```bash

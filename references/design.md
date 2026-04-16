@@ -106,8 +106,23 @@
 - 비교 브리핑 확인
 - watch add/check 및 두 번째 check에서 dedupe 동작 확인
 
+## 브라우저 보조 흐름 (2026-03-20 추가)
+- `scripts/browser_session_helper.py`를 추가해 local Playwright persistent profile을 재사용한다.
+- 핵심 서브커맨드:
+  - `resolve`: 텍스트/URL/ID에서 direct complex ID와 canonical complex URL 정리
+  - `capture`: 실제 네이버 land 페이지를 열고 현재 URL/HTML에서 complex ID 캡처 + storage state 저장
+  - `fetch`: 브라우저 same-origin `fetch`로 detail/articles JSON 보조 조회
+- 의도:
+  - broad HTML/API 호출이 403/429로 흔들릴 때 browser-origin 세션을 우회 실마리로 사용
+  - 사용자가 수동으로 네이버 부동산에서 단지 페이지를 열어둔 상태를 direct seed/lookup으로 빠르게 연결
+  - headless fetch와 non-headless capture를 분리해 자동/수동 흐름을 모두 지원
+- 한계:
+  - 완전한 anti-bot 우회를 보장하지는 않음
+  - login/captcha/manual step이 필요한 경우 capture 단계에서 사람 개입이 필요
+  - 현재 메인 `search_real_estate.py` 내부 자동 fallback까지는 붙이지 않고, 보조 헬퍼 + direct UX 개선 중심으로 반영
+
 ## 추가 개선 후보
-- Playwright 세션 재사용 기반 429 회피력 향상
+- browser helper 결과를 메인 search/watch 흐름에 선택적 자동 fallback으로 연결
 - 실거래가/전세가율 같은 파생 지표 추가
 - 특정 지역 사전(alias seed) 확장
 - 텔레그램 markdown-safe formatter 별도 스크립트 추가

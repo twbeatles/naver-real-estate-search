@@ -140,7 +140,8 @@ def main() -> int:
         else:
             lines = ["후보 단지"]
             for idx, row in enumerate(candidates, start=1):
-                lines.append(f"- {idx}. {row.get('name')} | {row.get('address') or '-'} | ID {row.get('complex_id')} | score {row.get('match_score', '-')} | source {row.get('source', '-')}")
+                direct = row.get('complex_url') or '-'
+                lines.append(f"- {idx}. {row.get('name')} | {row.get('address') or '-'} | ID {row.get('complex_id')} | score {row.get('match_score', '-')} | source {row.get('source', '-')} | direct {direct}")
             print("\n".join(lines))
         return 0
 
